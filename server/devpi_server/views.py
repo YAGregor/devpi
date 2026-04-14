@@ -1858,16 +1858,17 @@ def iter_cache_remote_file(stage, entry, url):
             raise BadGateway(msg, code=r.status_code, url=url)
         f = cstack.enter_context(entry.file_new_open())
         file_streamer = FileStreamer(f, entry, r)
+        file_stream_iter = iter(file_streamer)
         threadlog.info("reading remote: %r, target %s", URL(r.url), entry.relpath)
 
         try:
-            yield from file_streamer
+            yield from file_stream_iter
         except Exception as err:
             threadlog.error(str(err))
             raise
         except GeneratorExit:
             threadlog.error("client disconnected, still continue update cache")
-            for _ in file_streamer:
+            for _ in file_stream_iter:
                 pass
 
         if not entry.has_existing_metadata():
