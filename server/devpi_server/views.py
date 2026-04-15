@@ -53,6 +53,7 @@ from pyramid.traversal import DefaultRootFactory
 from pyramid.view import exception_view_config
 from pyramid.view import view_config
 from time import time
+from typing import IO
 from typing import TYPE_CHECKING
 from typing import cast
 from urllib.parse import urlparse
@@ -67,12 +68,14 @@ import warnings
 
 
 if TYPE_CHECKING:
+    from .filestore import BaseFileEntry
     from .main import XOM
     from .model import BaseStage
     from .model import ELink
     from .model import PrivateStage
     from collections.abc import Iterator
     from typing import NoReturn
+    import httpx
 
 
 devpiweb_hookimpl = HookimplMarker("devpiweb")
@@ -1843,6 +1846,10 @@ class FileStreamer:
 
         self.save_file_and_gen_hash()
 
+    @property
+    def download_completed(self) -> bool:
+        return self._download_completed
+
     def _iter_data(self) -> bytes | None:
         data_iter = self._data_iter
         running_hashes = self._running_hashes
@@ -1861,9 +1868,8 @@ class FileStreamer:
 
         running_hashes = self._running_hashes
         data_iter = self._data_iter
-        while 1 and (data_iter is not None):
-            data = self._iter_data()
-            if data is None:
+        while data_iter is not None:
+            if self._iter_data() is None:
                 break
 
         self.hashes = running_hashes.digests
@@ -1895,44 +1901,58 @@ def iter_cache_remote_file(stage, entry, url):
         f = cstack.enter_context(entry.file_new_open())
         file_streamer = FileStreamer(f, entry, r)
         threadlog.info("reading remote: %r, target %s", URL(r.url), entry.relpath)
-
+        exit_with_exception = False
         try:
             yield from file_streamer
         except Exception as err:
             threadlog.error(str(err))
+            exit_with_exception = True
             raise
-        except GeneratorExit:
-            threadlog.error("client disconnected, still continue update cache")
-            file_streamer.save_file_and_gen_hash()
+        finally:
+            if not exit_with_exception:
+                _update_file_cache(entry, xom, f, file_streamer, r)
 
-        if not entry.has_existing_metadata():
-            with xom.keyfs.write_transaction(allow_restart=True):
-                if entry.readonly:
-                    entry = xom.filestore.get_file_entry_from_key(entry.key)
-                entry.file_set_content(
-                    f,
-                    last_modified=r.headers.get("last-modified", None),
-                    hash_spec=entry._hash_spec,
-                    hashes=file_streamer.hashes)
-                if entry.project:
-                    stage = xom.model.getstage(entry.user, entry.index)
-                    # for mirror indexes this makes sure the project is in the database
-                    # as soon as a file was fetched
-                    stage.add_project_name(entry.project)
-                # on Windows we need to close the file
-                # before the transaction closes
-                f.close()
-        else:
-            # the file was downloaded before but locally removed, so put
-            # it back in place without creating a new serial
-            with xom.keyfs.filestore_transaction():
-                entry.file_set_content_no_meta(f, hashes=file_streamer.hashes)
-                threadlog.debug(
-                    "put missing file back into place: %s", entry.file_path_info
-                )
-                # on Windows we need to close the file
-                # before the transaction closes
-                f.close()
+def _update_file_cache(
+    entry: BaseFileEntry,
+    xom: XOM,
+    f: IO[bytes],
+    file_streamer: FileStreamer,
+    r: httpx.Response,
+):
+    threadlog.info("update file cache %s", entry.basename)
+    if not file_streamer.download_completed:
+        threadlog.info("continue download after disconnect")
+        file_streamer.save_file_and_gen_hash()
+    if not entry.has_existing_metadata():
+        with xom.keyfs.write_transaction(allow_restart=True):
+            if entry.readonly:
+                entry = xom.filestore.get_file_entry_from_key(entry.key)
+            entry.file_set_content(
+                f,
+                last_modified=r.headers.get("last-modified", None),
+                hash_spec=entry._hash_spec,
+                hashes=file_streamer.hashes,
+            )
+            if entry.project:
+                stage = xom.model.getstage(entry.user, entry.index)
+                # for mirror indexes this makes sure the project is in the database
+                # as soon as a file was fetched
+                stage.add_project_name(entry.project)
+            # on Windows we need to close the file
+            # before the transaction closes
+            f.close()
+    else:
+        # the file was downloaded before but locally removed, so put
+        # it back in place without creating a new serial
+        with xom.keyfs.filestore_transaction():
+            entry.file_set_content_no_meta(f, hashes=file_streamer.hashes)
+            threadlog.debug(
+                "put missing file back into place: %s", entry.file_path_info
+            )
+            # on Windows we need to close the file
+            # before the transaction closes
+            f.close()
+
 
 
 def iter_remote_file_replica(stage, entry, url):
