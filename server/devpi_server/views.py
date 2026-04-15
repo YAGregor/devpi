@@ -1836,16 +1836,24 @@ class FileStreamer:
         data_iter = self.response.iter_raw(10240)
         self._data_iter = data_iter
         while 1:
-            data = next(data_iter, None)
+            data = self._iter_data()
             if data is None:
                 break
-            self._file_size += len(data)
-            for rh in running_hashes._running_hashes:
-                rh.update(data)
-            self.f.write(data)
             yield data
 
         self.save_file_and_gen_hash()
+
+    def _iter_data(self) -> bytes | None:
+        data_iter = self._data_iter
+        running_hashes = self._running_hashes
+        data = next(data_iter, None)
+        if data is None:
+            return None
+        self._file_size += len(data)
+        for rh in running_hashes._running_hashes:
+            rh.update(data)
+        self.f.write(data)
+        return data
 
     def save_file_and_gen_hash(self):
         if self._download_completed:
@@ -1854,13 +1862,9 @@ class FileStreamer:
         running_hashes = self._running_hashes
         data_iter = self._data_iter
         while 1 and (data_iter is not None):
-            data = next(data_iter, None)
+            data = self._iter_data()
             if data is None:
                 break
-            self._file_size += len(data)
-            for rh in running_hashes._running_hashes:
-                rh.update(data)
-            self.f.write(data)
 
         self.hashes = running_hashes.digests
         content_size = self._content_size
