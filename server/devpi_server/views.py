@@ -1862,15 +1862,18 @@ class FileStreamer:
         self.f.write(data)
         return data
 
-    def save_file_and_gen_hash(self):
+    def save_file_and_gen_hash(self) -> bool:
         if self._download_completed:
-            return
+            return True
 
         running_hashes = self._running_hashes
         data_iter = self._data_iter
-        while data_iter is not None:
-            if self._iter_data() is None:
-                break
+
+        if data_iter is not None:
+            while self._iter_data():
+                pass
+        else:
+            return False
 
         self.hashes = running_hashes.digests
         content_size = self._content_size
@@ -1885,6 +1888,7 @@ class FileStreamer:
             if err is not None:
                 raise err
 
+        return True
 
 def iter_cache_remote_file(stage, entry, url):
     # we get and cache the file and some http headers from remote
@@ -1922,7 +1926,10 @@ def _update_file_cache(
     threadlog.info("update file cache %s", entry.basename)
     if not file_streamer.download_completed:
         threadlog.info("continue download after disconnect")
-        file_streamer.save_file_and_gen_hash()
+        if not file_streamer.save_file_and_gen_hash():
+            threadlog.info("skip continue download cause send head only")
+            return
+
     if not entry.has_existing_metadata():
         with xom.keyfs.write_transaction(allow_restart=True):
             if entry.readonly:
